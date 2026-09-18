@@ -1,24 +1,23 @@
 import os
 import json
 import threading
-import pika
 import requests
+import pika
 from dotenv import load_dotenv
 from flask import Flask, render_template, request, jsonify
-from supabase import create_client, Client
-from supabase.lib.client_options import ClientOptions
+from flask_socketio import SocketIO, emit
 
 load_dotenv()
 
 app = Flask(__name__)
+app.config['SECRET_KEY'] = 'dev-secret-key'
+socketio = SocketIO(app, async_mode='threading', cors_allowed_origins="*")
 
 QUEUE_NAME = 'web_demo_queue'
 CLOUDAMQP_URL = os.environ.get('CLOUDAMQP_URL', 'amqp://guest:guest@localhost:5672/%2f')
 
 SUPABASE_URL = os.environ.get('SUPABASE_URL')
 SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
 TABLE_NAME = 'queue_messages'
 
 def get_rabbitmq_connection():
@@ -27,6 +26,8 @@ def get_rabbitmq_connection():
     return pika.BlockingConnection(params)
 
 def save_message(content: str, direction: str) -> dict:
+    from supabase import create_client
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
     response = supabase.table(TABLE_NAME).insert({
         'content': content,
         'direction': direction
@@ -56,13 +57,15 @@ def publish():
         )
         connection.close()
         
+        # Уведомляем всех клиентов через WebSocket
+        socketio.emit('new_message', record, namespace='/')
+        
         return jsonify({'status': 'ok', 'record': record})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/messages')
 def get_messages():
-    # Прямой запрос к Supabase REST API без библиотеки
     headers = {
         'apikey': SUPABASE_KEY,
         'Authorization': f'Bearer {SUPABASE_KEY}'
@@ -72,12 +75,8 @@ def get_messages():
     try:
         response = requests.get(url, headers=headers)
         data = response.json()
-        print("=== RAW API RESPONSE ===")
-        print(type(data), data[:2] if isinstance(data, list) else data)
-        print("========================")
         return jsonify(data if isinstance(data, list) else [])
     except Exception as e:
-        print(f"API Error: {e}")
         return jsonify([])
 
 def rabbitmq_consumer():
@@ -91,7 +90,10 @@ def rabbitmq_consumer():
             def callback(ch, method, properties, body):
                 content = body.decode()
                 with app.app_context():
-                    save_message(content, 'received')
+                    record = save_message(content, 'received')
+                    if record:
+                        # Отправляем в WebSocket из фонового потока
+                        socketio.emit('new_message', record, namespace='/')
                 ch.basic_ack(delivery_tag=method.delivery_tag)
 
             channel.basic_consume(queue=QUEUE_NAME, on_message_callback=callback)
@@ -107,4 +109,5 @@ if __name__ == '__main__':
         consumer_thread = threading.Thread(target=rabbitmq_consumer, daemon=True)
         consumer_thread.start()
     
-    app.run(debug=True, port=5000)
+    # Запускаем через socketio.run вместо app.run
+    socketio.run(app, debug=True, port=5000, allow_unsafe_werkzeug=True)

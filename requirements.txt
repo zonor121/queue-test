@@ -4,3 +4,4 @@ flask-sock==0.7.0
 supabase
 dotenv
 requests
+flask-socketio
