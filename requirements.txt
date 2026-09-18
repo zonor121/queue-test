@@ -1,0 +1,6 @@
+flask==3.0.0
+pika==1.3.2
+flask-sock==0.7.0
+supabase
+dotenv
+requests
